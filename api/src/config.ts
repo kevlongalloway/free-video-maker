@@ -54,6 +54,8 @@ export class Config {
   // multi-tenant auth (subscription service mode)
   public authEnabled: boolean;
   public adminApiKey?: string;
+  /** Public origin of this service, used to build OAuth/MCP discovery URLs. */
+  public publicUrl: string;
 
   constructor() {
     this.dataDirPath =
@@ -102,6 +104,14 @@ export class Config {
         process.env.VIDEO_CACHE_SIZE_IN_BYTES,
       );
     }
+
+    // Public origin. Render injects RENDER_EXTERNAL_URL automatically; PUBLIC_URL
+    // overrides it (e.g. a custom domain). Falls back to localhost for dev.
+    this.publicUrl = (
+      process.env.PUBLIC_URL ||
+      process.env.RENDER_EXTERNAL_URL ||
+      `http://localhost:${this.port}`
+    ).replace(/\/+$/, "");
 
     this.adminApiKey = process.env.ADMIN_API_KEY || undefined;
     // Auth is on when explicitly enabled, or implicitly when an admin key is
