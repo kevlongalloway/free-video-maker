@@ -1,105 +1,43 @@
-# Description
+# Free Video Maker — Monorepo
 
-An open source automated video creation tool for generating short-form video content. Short Video Maker combines text-to-speech, automatic captions, background videos, and music to create engaging short videos from simple text inputs.
+A microservices-style monorepo. Each top-level directory is an independently
+deployable project with its own dependencies, build, and Render deploy filter.
 
-This project is meant to provide a free alternative to heavy GPU-power hungry video generation (and a free alternative to expensive, third-party API calls). It doesn't generate a video from scratch based on an image or an image prompt.
-
-Checkout more AI Related Videos in our Channel [WebSensePro](https://www.youtube.com/websensepro). We encourage you to check out the channel for more AI-related content and tutorials.
-
-The server exposes an [MCP](https://github.com/modelcontextprotocol) and a REST server.
-
-While the MCP server can be used with an AI Agent (like n8n) the REST endpoints provide more flexibility for video generation.
-
-# TOC
-
-## Getting started
-
-- [How to run the server](#docker-command)
-- [Web UI](#web-ui)
-- [Examples](#examples)
-
-## Usage
-
-- [Environment variables](#environment-variables)
-
-## Info
-
-- [Features](#features)
-- [How it works](#how-it-works)
-- [Limitations](#limitations)
-- [Acknowledgements](#acknowledgments)
-
-# Examples
-
-[Check out the video 1](https://youtube.com/shorts/APF0Q75FeHA)
-
-[Check out the video 2](https://youtube.com/shorts/GZi_3-bMZTI)
-
-# Features
-
-- Generate complete short videos from text prompts
-- Text-to-speech conversion
-- Automatic caption generation and styling
-- Background video search and selection via Pexels
-- Background music with genre/mood selection
-- Serve as both REST API and Model Context Protocol (MCP) server
-
-# How It Works
-
-Shorts Creator takes simple text inputs and search terms, then:
-
-1. Converts text to speech using Kokoro TTS
-2. Generates accurate captions via Whisper
-3. Finds relevant background videos from Pexels
-4. Composes all elements with Remotion
-5. Renders a professional-looking short video with perfectly timed captions
-
-# Limitations
-
-- The project only capable generating videos with English voiceover (kokoro-js doesn’t support other languages at the moment)
-- The background videos are sourced from Pexels
-
-# General Requirements
-
-- internet
-- free pexels api key
-- ≥ 3 gb free RAM, my recommendation is 4gb RAM
-- ≥ 2 vCPU
-- ≥ 5gb disc space
-
-
-## Scene
-
-Each video is assembled from multiple scenes. These scenes consists of
-
-1. Text: Narration, the text the TTS will read and create captions from.
-2. Search terms: The keywords the server should use to find videos from Pexels API. If none can be found, joker terms are being used (`nature`, `globe`, `space`, `ocean`)
-
-
-
-### Docker Command
-
-```jsx
-docker run -it --rm --name short-video-maker -p 3123:3123 -e LOG_LEVEL=debug -e PEXELS_API_KEY= bilalnaseer/free-video-maker:latest
+```
+free-video-maker/
+├── api/       # Backend video-generation service (Whisper + Kokoro + Remotion, Express REST + MCP)
+├── landing/   # Public marketing / sales site (Astro static site)  — skeleton
+├── app/       # Post-signup product frontend (Next.js static site) — skeleton
+└── render.yaml  # Render Blueprint for all three services (must stay at repo root)
 ```
 
+## Projects
 
-# Web UI
+| Directory  | What it is                                   | Stack                     | Status   |
+|------------|----------------------------------------------|---------------------------|----------|
+| `api/`     | Original video-maker backend                 | Node/TS, Express, Remotion | Complete |
+| `landing/` | Marketing + pricing/sales page               | Astro + Tailwind CSS      | Skeleton |
+| `app/`     | Authenticated dashboard shown after sign-up  | Next.js (App Router, static export) + TS + Tailwind | Skeleton |
 
-Load web UI to generate videos here http://localhost:3123
+See each directory's own `README.md` for how to run and build it.
 
-# Environment variables
+## Deployment (Render)
 
-## 🟢 Configuration
+All three services are defined in a single [Render Blueprint](https://render.com/docs/blueprint-spec)
+at [`render.yaml`](./render.yaml).
 
-| key             | description                                                     | default |
-| --------------- | --------------------------------------------------------------- | ------- |
-| PEXELS_API_KEY  | [your (free) Pexels API key](https://www.pexels.com/api/)       |         |
-| LOG_LEVEL       | pino log level                                                  | info    |
-| WHISPER_VERBOSE | whether the output of whisper.cpp should be forwarded to stdout | false   |
-| PORT            | the port the server will listen on                              | 3123    |
+Each service uses a `buildFilter` so it **only redeploys when files inside its
+own directory change** — updating `landing/` will not rebuild `api/`, and so on.
+See ["Adding this to Render"](#adding-this-to-render) below.
 
+### Adding this to Render
 
-## Acknowledgments
+1. Push this branch to GitHub.
+2. In the Render dashboard: **New + → Blueprint**, connect this repo, pick the branch.
+3. Render reads `render.yaml` and provisions all three services.
+4. Provide the secrets it prompts for (`PEXELS_API_KEY` for the API; set
+   `NEXT_PUBLIC_API_URL` on the app once the API URL is known).
 
-- ❤️ [ai_agents_az]((https://github.com/gyoridavid/ai_agents_az) AI Agents AZ is the original creator of this repo, which I forked to make it easier for my youtube audience.
+If you already have this repo connected as a Blueprint, Render picks up the new
+`render.yaml` on the next push and syncs the new services and build filters
+automatically.
