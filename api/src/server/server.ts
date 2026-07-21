@@ -8,7 +8,9 @@ import path from "path";
 import { ShortCreator } from "../short-creator/ShortCreator";
 import { AdCreator } from "../ad-creator/AdCreator";
 import { TenantStore } from "../auth/TenantStore";
-import { authenticate } from "../auth/middleware";
+import { OAuthStore } from "../auth/oauth/OAuthStore";
+import { OAuthRouter } from "../auth/oauth/router";
+import { authenticate, AuthOptions } from "../auth/middleware";
 import { APIRouter } from "./routers/rest";
 import { MCPRouter } from "./routers/mcp";
 import { AdminRouter } from "./routers/admin";
@@ -27,6 +29,13 @@ export class Server {
     if (config.adminApiKey) {
       store.ensureAdmin(config.adminApiKey);
     }
+    const oauth = new OAuthStore(config.getDataDirPath());
+    // Shared auth options: accept OAuth bearer tokens everywhere and advertise
+    // the OAuth discovery document on 401s so MCP clients can self-configure.
+    const authOpts: AuthOptions = {
+      oauth,
+      resourceMetadataUrl: `${config.publicUrl}/.well-known/oauth-protected-resource`,
+    };
     const adCreator = new AdCreator(shortCreator);
 
     if (config.authEnabled) {
@@ -48,20 +57,27 @@ export class Server {
       adCreator,
       store,
       config.authEnabled,
+      authOpts,
     );
     const mcpRouter = new MCPRouter(
       shortCreator,
       adCreator,
       store,
       config.authEnabled,
+      authOpts,
     );
     const adminRouter = new AdminRouter(store);
+    const oauthRouter = new OAuthRouter(oauth, store, config.publicUrl);
+
+    // OAuth authorization server + discovery metadata (mounted at root so the
+    // /.well-known/* endpoints resolve where clients expect them).
+    this.app.use("/", oauthRouter.router);
 
     // Admin provisioning API — authenticated, then admin-gated inside the router.
     this.app.use(
       "/api/admin",
       express.json(),
-      authenticate(store, config.authEnabled),
+      authenticate(store, config.authEnabled, authOpts),
       adminRouter.router,
     );
     this.app.use("/api", apiRouter.router);

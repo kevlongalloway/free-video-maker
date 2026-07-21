@@ -12,7 +12,7 @@ import { AdCreator } from "../../ad-creator/AdCreator";
 import { listPlatforms, listFormats } from "../../ad-creator/platforms";
 import { adBriefInput } from "../../types/ads";
 import { TenantStore } from "../../auth/TenantStore";
-import { authenticate, enforceQuota } from "../../auth/middleware";
+import { authenticate, enforceQuota, AuthOptions } from "../../auth/middleware";
 import { logger } from "../../logger";
 import { Config } from "../../config";
 
@@ -30,6 +30,7 @@ export class APIRouter {
     adCreator: AdCreator,
     store: TenantStore,
     authEnabled: boolean,
+    authOpts: AuthOptions = {},
   ) {
     this.config = config;
     this.router = express.Router();
@@ -40,7 +41,7 @@ export class APIRouter {
     this.router.use(express.json());
     // Every /api route is authenticated. When auth is disabled the middleware
     // injects a local admin tenant so nothing downstream needs to branch.
-    this.router.use(authenticate(store, authEnabled));
+    this.router.use(authenticate(store, authEnabled, authOpts));
 
     this.setupRoutes();
   }

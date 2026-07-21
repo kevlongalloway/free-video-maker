@@ -11,7 +11,7 @@ import { ShortCreator } from "../../short-creator/ShortCreator";
 import { AdCreator } from "../../ad-creator/AdCreator";
 import { listPlatforms } from "../../ad-creator/platforms";
 import { TenantStore } from "../../auth/TenantStore";
-import { authenticate } from "../../auth/middleware";
+import { authenticate, AuthOptions } from "../../auth/middleware";
 import { planFor, Tenant } from "../../auth/types";
 import { logger } from "../../logger";
 import { renderConfig, sceneInput } from "../../types/shorts";
@@ -35,10 +35,11 @@ export class MCPRouter {
     private adCreator: AdCreator,
     private store: TenantStore,
     private authEnabled: boolean,
+    authOpts: AuthOptions = {},
   ) {
     this.router = express.Router();
     // Authenticate both the SSE handshake and the message channel.
-    this.router.use(authenticate(store, authEnabled));
+    this.router.use(authenticate(store, authEnabled, authOpts));
     this.setupRoutes();
   }
 

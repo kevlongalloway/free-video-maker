@@ -6,8 +6,20 @@ import type {
 
 import { logger } from "../logger";
 import { TenantStore } from "./TenantStore";
+import { OAuthStore } from "./oauth/OAuthStore";
 import { extractApiKey } from "./apiKey";
 import { Tenant, planFor } from "./types";
+
+/**
+ * Optional extras for `authenticate`. When an OAuthStore is supplied, bearer
+ * tokens issued by the embedded OAuth server are accepted in addition to raw
+ * API keys. When a resourceMetadataUrl is supplied, 401s carry the
+ * `WWW-Authenticate` header that tells MCP clients where to start OAuth.
+ */
+export interface AuthOptions {
+  oauth?: OAuthStore;
+  resourceMetadataUrl?: string;
+}
 
 // Augment Express' Request so downstream handlers can read `req.tenant`.
 declare global {
@@ -36,7 +48,23 @@ const LOCAL_TENANT: Tenant = {
  * local admin tenant so existing single-user / Docker workflows keep working.
  * When enabled it requires a valid, non-disabled API key.
  */
-export function authenticate(store: TenantStore, authEnabled: boolean) {
+export function authenticate(
+  store: TenantStore,
+  authEnabled: boolean,
+  opts: AuthOptions = {},
+) {
+  // Emit a 401 with the OAuth discovery pointer (RFC 9728) when configured, so
+  // MCP clients know to begin the OAuth flow instead of just failing.
+  const unauthorized = (res: ExpressResponse, message: string): void => {
+    if (opts.resourceMetadataUrl) {
+      res.set(
+        "WWW-Authenticate",
+        `Bearer resource_metadata="${opts.resourceMetadataUrl}"`,
+      );
+    }
+    res.status(401).json({ error: "Unauthorized", message });
+  };
+
   return (
     req: ExpressRequest,
     res: ExpressResponse,
@@ -55,17 +83,21 @@ export function authenticate(store: TenantStore, authEnabled: boolean) {
       },
     );
     if (!rawKey) {
-      res.status(401).json({
-        error: "Unauthorized",
-        message:
-          "Missing API key. Send it as 'Authorization: Bearer <key>' or 'x-api-key'.",
-      });
+      unauthorized(
+        res,
+        "Missing credentials. Send an API key or OAuth bearer token in the 'Authorization' header.",
+      );
       return;
     }
 
-    const tenant = store.getByRawKey(rawKey);
+    // A credential can be either a raw API key or an OAuth access token.
+    let tenant = store.getByRawKey(rawKey);
+    if (!tenant && opts.oauth) {
+      const tenantId = opts.oauth.getTenantIdForAccessToken(rawKey);
+      if (tenantId) tenant = store.getById(tenantId);
+    }
     if (!tenant) {
-      res.status(401).json({ error: "Unauthorized", message: "Invalid API key" });
+      unauthorized(res, "Invalid or expired credentials");
       return;
     }
     if (tenant.disabled) {
