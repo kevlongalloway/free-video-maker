@@ -7,7 +7,7 @@ deployable project with its own dependencies, build, and Render deploy filter.
 free-video-maker/
 ├── api/       # Backend video-generation service (Whisper + Kokoro + Remotion, Express REST + MCP)
 ├── landing/   # Public marketing / sales site (Astro static site)  — skeleton
-├── app/       # Post-signup product frontend (Next.js)             — skeleton
+├── app/       # Post-signup product frontend (Next.js static site) — skeleton
 └── render.yaml  # Render Blueprint for all three services (must stay at repo root)
 ```
 
@@ -17,7 +17,7 @@ free-video-maker/
 |------------|----------------------------------------------|---------------------------|----------|
 | `api/`     | Original video-maker backend                 | Node/TS, Express, Remotion | Complete |
 | `landing/` | Marketing + pricing/sales page               | Astro + Tailwind CSS      | Skeleton |
-| `app/`     | Authenticated dashboard shown after sign-up  | Next.js (App Router) + TS + Tailwind | Skeleton |
+| `app/`     | Authenticated dashboard shown after sign-up  | Next.js (App Router, static export) + TS + Tailwind | Skeleton |
 
 See each directory's own `README.md` for how to run and build it.
 

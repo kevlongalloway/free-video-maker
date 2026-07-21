@@ -19,9 +19,11 @@ the video-generation backend lives in `/api`.)
 ```bash
 npm install      # install dependencies
 npm run dev      # start the dev server (http://localhost:3000)
-npm run build    # production build
-npm start        # start the production server
+npm run build    # static export -> ./out
 ```
+
+> `next.config.mjs` sets `output: "export"`, so `npm run build` produces a
+> fully static site in `./out` (no Node server required).
 
 ## Environment
 
@@ -33,10 +35,11 @@ Copy `.env.example` to `.env.local` and set:
 
 ## Deployment
 
-Deploys on [Render](https://render.com/) as a **Node web service**:
+Deploys on [Render](https://render.com/) as a **static site** (free):
 
 - **Build command:** `npm install && npm run build`
-- **Start command:** `npm start`
+- **Publish directory:** `./out`
 
 Set `NEXT_PUBLIC_API_URL` in the Render service's environment to point at the
-deployed `/api` service.
+deployed `/api` service. Because this is a static build, that value is baked in
+at build time — changing it requires a rebuild.

@@ -73,21 +73,26 @@ services:
         source: /*
         destination: /index.html
 
-  # ── Post-signup app (Next.js) ───────────────────────────────────
-  # SKELETON: base template only. Runs as a Node web service.
+  # ── Post-signup app (Next.js static export) ─────────────────────
+  # SKELETON: base template only. Deploys as a Render static site.
+  # next.config.mjs sets `output: "export"`, so `next build` emits a fully
+  # static site to ./out — no Node server needed. Static sites are free.
   - type: web
     name: free-video-maker-app
-    runtime: node
+    runtime: static
     rootDir: app
-    plan: free # bump to "starter" to avoid free-tier spin-down
-    region: oregon
     buildCommand: npm install && npm run build
-    startCommand: npm start
+    staticPublishPath: ./out
     # Only redeploy when something inside app/ changes.
     buildFilter:
       paths:
         - app/**
+    routes:
+      # SPA-style fallback so client-side routes resolve.
+      - type: rewrite
+        source: /*
+        destination: /index.html
     envVars:
-      # URL of the backend API service above (set once the API is live).
+      # URL of the backend API service above (baked in at build time).
       - key: NEXT_PUBLIC_API_URL
         sync: false
