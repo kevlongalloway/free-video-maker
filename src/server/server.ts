@@ -6,8 +6,12 @@ import type {
 } from "express";
 import path from "path";
 import { ShortCreator } from "../short-creator/ShortCreator";
+import { AdCreator } from "../ad-creator/AdCreator";
+import { TenantStore } from "../auth/TenantStore";
+import { authenticate } from "../auth/middleware";
 import { APIRouter } from "./routers/rest";
 import { MCPRouter } from "./routers/mcp";
+import { AdminRouter } from "./routers/admin";
 import { logger } from "../logger";
 import { Config } from "../config";
 
@@ -19,13 +23,47 @@ export class Server {
     this.config = config;
     this.app = express();
 
-    // add healthcheck endpoint
+    const store = new TenantStore(config.getDataDirPath());
+    if (config.adminApiKey) {
+      store.ensureAdmin(config.adminApiKey);
+    }
+    const adCreator = new AdCreator(shortCreator);
+
+    if (config.authEnabled) {
+      logger.info("Auth is ENABLED (multi-tenant subscription mode)");
+    } else {
+      logger.warn(
+        "Auth is DISABLED — all requests run as a local admin tenant. Set AUTH_ENABLED=true and ADMIN_API_KEY to run as a service.",
+      );
+    }
+
+    // add healthcheck endpoint (public, unauthenticated)
     this.app.get("/health", (req: ExpressRequest, res: ExpressResponse) => {
       res.status(200).json({ status: "ok" });
     });
 
-    const apiRouter = new APIRouter(config, shortCreator);
-    const mcpRouter = new MCPRouter(shortCreator);
+    const apiRouter = new APIRouter(
+      config,
+      shortCreator,
+      adCreator,
+      store,
+      config.authEnabled,
+    );
+    const mcpRouter = new MCPRouter(
+      shortCreator,
+      adCreator,
+      store,
+      config.authEnabled,
+    );
+    const adminRouter = new AdminRouter(store);
+
+    // Admin provisioning API — authenticated, then admin-gated inside the router.
+    this.app.use(
+      "/api/admin",
+      express.json(),
+      authenticate(store, config.authEnabled),
+      adminRouter.router,
+    );
     this.app.use("/api", apiRouter.router);
     this.app.use("/mcp", mcpRouter.router);
 
