@@ -1,98 +1,163 @@
 import express from "express";
+import type {
+  Request as ExpressRequest,
+  Response as ExpressResponse,
+} from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import z from "zod";
 
 import { ShortCreator } from "../../short-creator/ShortCreator";
+import { AdCreator } from "../../ad-creator/AdCreator";
+import { listPlatforms } from "../../ad-creator/platforms";
+import { TenantStore } from "../../auth/TenantStore";
+import { authenticate } from "../../auth/middleware";
+import { planFor, Tenant } from "../../auth/types";
 import { logger } from "../../logger";
 import { renderConfig, sceneInput } from "../../types/shorts";
+import { adBriefInput } from "../../types/ads";
 
+/**
+ * MCP server exposed over SSE. Unlike the original single global server, each
+ * SSE connection gets its own McpServer whose tools are bound to the
+ * authenticated tenant. This gives us real multi-tenant isolation: a tenant
+ * can only see and act on their own videos, and every render is metered
+ * against their plan.
+ */
 export class MCPRouter {
-  router: express.Router;
-  shortCreator: ShortCreator;
-  transports: { [sessionId: string]: SSEServerTransport } = {};
-  mcpServer: McpServer;
-  constructor(shortCreator: ShortCreator) {
+  public router: express.Router;
+  private transports: {
+    [sessionId: string]: { transport: SSEServerTransport; tenantId: string };
+  } = {};
+
+  constructor(
+    private shortCreator: ShortCreator,
+    private adCreator: AdCreator,
+    private store: TenantStore,
+    private authEnabled: boolean,
+  ) {
     this.router = express.Router();
-    this.shortCreator = shortCreator;
-
-    this.mcpServer = new McpServer({
-      name: "Short Creator",
-      version: "0.0.1",
-      capabilities: {
-        resources: {},
-        tools: {},
-      },
-    });
-
-    this.setupMCPServer();
+    // Authenticate both the SSE handshake and the message channel.
+    this.router.use(authenticate(store, authEnabled));
     this.setupRoutes();
   }
 
-  private setupMCPServer() {
-    this.mcpServer.tool(
+  /** Build a per-connection MCP server whose tools act as `tenant`. */
+  private buildServer(tenant: Tenant): McpServer {
+    const server = new McpServer({
+      name: "Ad & Short Video Creator",
+      version: "1.0.0",
+      capabilities: { resources: {}, tools: {} },
+    });
+
+    const checkQuotaOrThrow = () => {
+      const plan = planFor(tenant);
+      if (plan.monthlyVideoQuota === -1) return;
+      const usage = this.store.getUsage(tenant.id);
+      if (usage.count >= plan.monthlyVideoQuota) {
+        throw new Error(
+          `Monthly quota of ${plan.monthlyVideoQuota} videos reached on the ${plan.name} plan.`,
+        );
+      }
+    };
+
+    const meter = (videoId: string) => {
+      this.store.setOwner(videoId, tenant.id);
+      this.store.incrementUsage(tenant.id);
+    };
+
+    server.tool(
       "get-video-status",
       "Get the status of a video (ready, processing, failed)",
-      {
-        videoId: z.string().describe("The ID of the video"),
-      },
+      { videoId: z.string().describe("The ID of the video") },
       async ({ videoId }) => {
-        const status = this.shortCreator.status(videoId);
+        if (!tenant.isAdmin && !this.store.isOwner(videoId, tenant.id)) {
+          return {
+            content: [{ type: "text", text: "not found" }],
+          };
+        }
         return {
           content: [
-            {
-              type: "text",
-              text: status,
-            },
+            { type: "text", text: this.shortCreator.status(videoId) },
           ],
         };
       },
     );
 
-    this.mcpServer.tool(
+    server.tool(
+      "list-ad-platforms",
+      "List the supported ad platforms and their delivery specs (aspect ratio, max duration, caption safe zones)",
+      {},
+      async () => ({
+        content: [
+          { type: "text", text: JSON.stringify(listPlatforms(), null, 2) },
+        ],
+      }),
+    );
+
+    server.tool(
+      "create-ad",
+      "Create a short-form video AD for a platform (meta, tiktok, youtube_shorts, youtube, ...) from a product brief. Returns a videoId to poll with get-video-status.",
+      adBriefInput.shape,
+      async (brief) => {
+        checkQuotaOrThrow();
+        const videoId = this.adCreator.createAd(brief);
+        meter(videoId);
+        return { content: [{ type: "text", text: videoId }] };
+      },
+    );
+
+    server.tool(
       "create-short-video",
-      "Create a short video from a list of scenes",
+      "Create a generic short video from a list of scenes (no ad templating). Returns a videoId.",
       {
         scenes: z.array(sceneInput).describe("Each scene to be created"),
         config: renderConfig.describe("Configuration for rendering the video"),
       },
       async ({ scenes, config }) => {
-        const videoId = await this.shortCreator.addToQueue(scenes, config);
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: videoId,
-            },
-          ],
-        };
+        checkQuotaOrThrow();
+        const videoId = this.shortCreator.addToQueue(scenes, config);
+        meter(videoId);
+        return { content: [{ type: "text", text: videoId }] };
       },
     );
+
+    return server;
   }
 
   private setupRoutes() {
-    this.router.get("/sse", async (req, res) => {
-      logger.info("SSE GET request received");
+    this.router.get("/sse", async (req: ExpressRequest, res: ExpressResponse) => {
+      const tenant = req.tenant!;
+      logger.info({ tenantId: tenant.id }, "MCP SSE connection opened");
 
+      const server = this.buildServer(tenant);
       const transport = new SSEServerTransport("/mcp/messages", res);
-      this.transports[transport.sessionId] = transport;
+      this.transports[transport.sessionId] = {
+        transport,
+        tenantId: tenant.id,
+      };
       res.on("close", () => {
         delete this.transports[transport.sessionId];
       });
-      await this.mcpServer.connect(transport);
+      await server.connect(transport);
     });
 
-    this.router.post("/messages", async (req, res) => {
-      logger.info("SSE POST request received");
-
-      const sessionId = req.query.sessionId as string;
-      const transport = this.transports[sessionId];
-      if (transport) {
-        await transport.handlePostMessage(req, res);
-      } else {
-        res.status(400).send("No transport found for sessionId");
-      }
-    });
+    this.router.post(
+      "/messages",
+      async (req: ExpressRequest, res: ExpressResponse) => {
+        const sessionId = req.query.sessionId as string;
+        const entry = this.transports[sessionId];
+        if (!entry) {
+          res.status(400).send("No transport found for sessionId");
+          return;
+        }
+        // The message must come from the same tenant that opened the session.
+        if (this.authEnabled && req.tenant?.id !== entry.tenantId) {
+          res.status(403).send("Session does not belong to this API key");
+          return;
+        }
+        await entry.transport.handlePostMessage(req, res);
+      },
+    );
   }
 }

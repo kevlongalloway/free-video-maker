@@ -1,0 +1,38 @@
+# Render Blueprint for Short/Free Video Maker
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Deploy: Render Dashboard -> New + -> Blueprint -> connect this repo.
+# Render reads this file and provisions the service below.
+#
+# IMPORTANT: This app runs Whisper (STT), Kokoro (TTS) and headless
+# Chrome + Remotion (video rendering) in one process. It needs real
+# memory. Do NOT use free/starter (512 MB) for actual video generation
+# it will OOM. "standard" (2 GB) is the practical minimum; "pro" (4 GB)
+# matches the project's recommended 4 GB.
+services:
+  - type: web
+    name: free-video-maker
+    runtime: docker
+    # Use the "tiny" image (tiny.en Whisper + q4 Kokoro) for lower memory.
+    # Swap to ./main.Dockerfile for higher quality if you size up the plan.
+    dockerfilePath: ./main-tiny.Dockerfile
+    dockerContext: .
+    plan: standard # standard = 2 GB / 1 CPU. Bump to "pro" (4 GB) for headroom.
+    region: oregon # change to your closest region (e.g. frankfurt, singapore)
+    # The app reads process.env.PORT, which Render sets automatically.
+    healthCheckPath: /
+    # Persistent storage for rendered videos under DATA_DIR_PATH (/app/data).
+    # Without this, generated videos are lost on every redeploy/restart.
+    # Remove this block if you only generate-then-download and don't
+    # need videos to survive restarts.
+    disk:
+      name: data
+      mountPath: /app/data
+      sizeGB: 10
+    envVars:
+      # REQUIRED. Get a free key at https://www.pexels.com/api/
+      # Left blank on purpose so Render prompts you for it at deploy time.
+      - key: PEXELS_API_KEY
+        sync: false
+      - key: LOG_LEVEL
+        value: info

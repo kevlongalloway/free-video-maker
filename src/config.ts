@@ -51,6 +51,10 @@ export class Config {
   public concurrency?: number;
   public videoCacheSizeInBytes: number | null = null;
 
+  // multi-tenant auth (subscription service mode)
+  public authEnabled: boolean;
+  public adminApiKey?: string;
+
   constructor() {
     this.dataDirPath =
       process.env.DATA_DIR_PATH ||
@@ -98,6 +102,17 @@ export class Config {
         process.env.VIDEO_CACHE_SIZE_IN_BYTES,
       );
     }
+
+    this.adminApiKey = process.env.ADMIN_API_KEY || undefined;
+    // Auth is on when explicitly enabled, or implicitly when an admin key is
+    // provided (so turning the service on is a single env var). Off by default
+    // preserves the original single-user / local behavior.
+    this.authEnabled =
+      process.env.AUTH_ENABLED === "true" || Boolean(this.adminApiKey);
+  }
+
+  public getDataDirPath(): string {
+    return this.dataDirPath;
   }
 
   public ensureConfig() {
