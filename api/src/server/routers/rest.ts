@@ -39,8 +39,18 @@ export class APIRouter {
     this.store = store;
 
     this.router.use(express.json());
-    // Every /api route is authenticated. When auth is disabled the middleware
-    // injects a local admin tenant so nothing downstream needs to branch.
+
+    // Internal media routes used by the renderer (headless Chrome / Remotion
+    // fetches scene assets over http://localhost/api/tmp/... during a render).
+    // These MUST be registered before the auth middleware: the render process
+    // has no API key, so gating them behind auth returns 401 and the render
+    // fails with no assets. They serve opaque, cuid-named temp files and static
+    // music only — never tenant-scoped data. Express runs handlers in
+    // registration order, so anything added here bypasses `authenticate`.
+    this.setupPublicRoutes();
+
+    // Every other /api route is authenticated. When auth is disabled the
+    // middleware injects a local admin tenant so nothing downstream branches.
     this.router.use(authenticate(store, authEnabled, authOpts));
 
     this.setupRoutes();
@@ -52,6 +62,79 @@ export class APIRouter {
     if (!tenant) return false;
     if (tenant.isAdmin) return true;
     return this.store.isOwner(videoId, tenant.id);
+  }
+
+  /**
+   * Routes that must be reachable without authentication because the render
+   * process (headless Chrome / Remotion) fetches them with no credentials.
+   * They only serve opaque temp files and static music — no tenant data.
+   */
+  private setupPublicRoutes() {
+    // Internal media used by the renderer — not tenant-scoped (opaque temp ids).
+    this.router.get(
+      "/tmp/:tmpFile",
+      (req: ExpressRequest, res: ExpressResponse) => {
+        const { tmpFile } = req.params;
+        if (!tmpFile) {
+          res.status(400).json({ error: "tmpFile is required" });
+          return;
+        }
+        // Guard against path traversal now that this route is unauthenticated.
+        if (tmpFile !== path.basename(tmpFile)) {
+          res.status(400).json({ error: "invalid tmpFile" });
+          return;
+        }
+        const tmpFilePath = path.join(this.config.tempDirPath, tmpFile);
+        if (!fs.existsSync(tmpFilePath)) {
+          res.status(404).json({ error: "tmpFile not found" });
+          return;
+        }
+
+        if (tmpFile.endsWith(".mp3")) {
+          res.setHeader("Content-Type", "audio/mpeg");
+        }
+        if (tmpFile.endsWith(".wav")) {
+          res.setHeader("Content-Type", "audio/wav");
+        }
+        if (tmpFile.endsWith(".mp4")) {
+          res.setHeader("Content-Type", "video/mp4");
+        }
+
+        const tmpFileStream = fs.createReadStream(tmpFilePath);
+        tmpFileStream.on("error", (error) => {
+          logger.error(error, "Error reading tmp file");
+          res.status(500).json({ error: "Error reading tmp file", tmpFile });
+        });
+        tmpFileStream.pipe(res);
+      },
+    );
+
+    this.router.get(
+      "/music/:fileName",
+      (req: ExpressRequest, res: ExpressResponse) => {
+        const { fileName } = req.params;
+        if (!fileName) {
+          res.status(400).json({ error: "fileName is required" });
+          return;
+        }
+        // Guard against path traversal now that this route is unauthenticated.
+        if (fileName !== path.basename(fileName)) {
+          res.status(400).json({ error: "invalid fileName" });
+          return;
+        }
+        const musicFilePath = path.join(this.config.musicDirPath, fileName);
+        if (!fs.existsSync(musicFilePath)) {
+          res.status(404).json({ error: "music file not found" });
+          return;
+        }
+        const musicFileStream = fs.createReadStream(musicFilePath);
+        musicFileStream.on("error", (error) => {
+          logger.error(error, "Error reading music file");
+          res.status(500).json({ error: "Error reading music file", fileName });
+        });
+        musicFileStream.pipe(res);
+      },
+    );
   }
 
   private setupRoutes() {
@@ -245,62 +328,6 @@ export class APIRouter {
         this.shortCreator.deleteVideo(videoId);
         this.store.removeOwnership(videoId);
         res.status(200).json({ success: true });
-      },
-    );
-
-    // Internal media used by the renderer — not tenant-scoped (opaque temp ids).
-    this.router.get(
-      "/tmp/:tmpFile",
-      (req: ExpressRequest, res: ExpressResponse) => {
-        const { tmpFile } = req.params;
-        if (!tmpFile) {
-          res.status(400).json({ error: "tmpFile is required" });
-          return;
-        }
-        const tmpFilePath = path.join(this.config.tempDirPath, tmpFile);
-        if (!fs.existsSync(tmpFilePath)) {
-          res.status(404).json({ error: "tmpFile not found" });
-          return;
-        }
-
-        if (tmpFile.endsWith(".mp3")) {
-          res.setHeader("Content-Type", "audio/mpeg");
-        }
-        if (tmpFile.endsWith(".wav")) {
-          res.setHeader("Content-Type", "audio/wav");
-        }
-        if (tmpFile.endsWith(".mp4")) {
-          res.setHeader("Content-Type", "video/mp4");
-        }
-
-        const tmpFileStream = fs.createReadStream(tmpFilePath);
-        tmpFileStream.on("error", (error) => {
-          logger.error(error, "Error reading tmp file");
-          res.status(500).json({ error: "Error reading tmp file", tmpFile });
-        });
-        tmpFileStream.pipe(res);
-      },
-    );
-
-    this.router.get(
-      "/music/:fileName",
-      (req: ExpressRequest, res: ExpressResponse) => {
-        const { fileName } = req.params;
-        if (!fileName) {
-          res.status(400).json({ error: "fileName is required" });
-          return;
-        }
-        const musicFilePath = path.join(this.config.musicDirPath, fileName);
-        if (!fs.existsSync(musicFilePath)) {
-          res.status(404).json({ error: "music file not found" });
-          return;
-        }
-        const musicFileStream = fs.createReadStream(musicFilePath);
-        musicFileStream.on("error", (error) => {
-          logger.error(error, "Error reading music file");
-          res.status(500).json({ error: "Error reading music file", fileName });
-        });
-        musicFileStream.pipe(res);
       },
     );
 
