@@ -24,12 +24,28 @@ import type {
   MusicForVideo,
 } from "../types/shorts";
 
+/** Details recorded when a render fails, so failures are diagnosable. */
+export type VideoFailure = {
+  /** The pipeline stage that threw (e.g. "narration", "stock-video"). */
+  stage: string;
+  message: string;
+  stack?: string;
+  failedAt: string;
+};
+
 export class ShortCreator {
   private queue: {
     sceneInput: SceneInput[];
     config: RenderConfig;
     id: string;
   }[] = [];
+  /**
+   * Why a given video id failed. `status()` otherwise cannot tell a genuine
+   * failure apart from an id that was never seen — both fall through to
+   * "failed". Recording the reason here is what makes an instant-fail
+   * debuggable after the fact.
+   */
+  private failures = new Map<string, VideoFailure>();
   constructor(
     private config: Config,
     private remotion: Remotion,
@@ -48,21 +64,75 @@ export class ShortCreator {
     if (fs.existsSync(videoPath)) {
       return "ready";
     }
+    // Everything else is "failed" — including ids that were never seen. Where
+    // we have a recorded reason, `getFailure(id)` explains why.
     return "failed";
   }
 
   public addToQueue(sceneInput: SceneInput[], config: RenderConfig): string {
     // todo add mutex lock
     const id = cuid();
+    // A fresh attempt clears any stale failure record for this id.
+    this.failures.delete(id);
     this.queue.push({
       sceneInput,
       config,
       id,
     });
+    logger.info(
+      { id, scenes: sceneInput.length, queueLength: this.queue.length },
+      "Queued video for rendering",
+    );
     if (this.queue.length === 1) {
       this.processQueue();
     }
     return id;
+  }
+
+  /** Record why a render failed so it can be surfaced and diagnosed later. */
+  private recordFailure(id: string, stage: string, error: unknown): void {
+    const err =
+      error instanceof Error ? error : new Error(String(error));
+    const failure: VideoFailure = {
+      stage,
+      message: err.message,
+      stack: err.stack,
+      failedAt: new Date().toISOString(),
+    };
+    this.failures.set(id, failure);
+    // Logged at error level with the full Error (serialized with its stack by
+    // the pino error serializer) plus structured fields, so the exact failing
+    // stage is visible in Render logs even at LOG_LEVEL=info.
+    logger.error(
+      { err, id, stage },
+      `Video render failed during "${stage}" stage`,
+    );
+  }
+
+  /** The recorded failure for a video id, if it failed. */
+  public getFailure(id: string): VideoFailure | undefined {
+    return this.failures.get(id);
+  }
+
+  /**
+   * Run one pipeline stage, logging its start (at info so it shows up on
+   * Render) and tagging any thrown error with the stage name so the queue's
+   * catch block can attribute the failure precisely.
+   */
+  private async stage<T>(
+    stage: string,
+    context: Record<string, unknown>,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    logger.info({ stage, ...context }, `Render stage: ${stage}`);
+    try {
+      return await fn();
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        (error as { stage?: string }).stage = stage;
+      }
+      throw error;
+    }
   }
 
   private async processQueue(): Promise<void> {
@@ -71,15 +141,22 @@ export class ShortCreator {
       return;
     }
     const { sceneInput, config, id } = this.queue[0];
-    logger.debug(
-      { sceneInput, config, id },
+    logger.info(
+      { id, scenes: sceneInput.length },
       "Processing video item in the queue",
     );
+    logger.debug({ sceneInput, config, id }, "Queue item payload");
     try {
       await this.createShort(id, sceneInput, config);
-      logger.debug({ id }, "Video created successfully");
+      logger.info({ id }, "Video created successfully");
     } catch (error: unknown) {
-      logger.error(error, "Error creating video");
+      // createShort annotates thrown errors with the failing stage. Fall back
+      // to "unknown" so nothing goes unrecorded.
+      const stage =
+        error instanceof Error && (error as { stage?: string }).stage
+          ? (error as { stage?: string }).stage!
+          : "unknown";
+      this.recordFailure(id, stage, error);
     } finally {
       this.queue.shift();
       this.processQueue();
@@ -91,26 +168,32 @@ export class ShortCreator {
     inputScenes: SceneInput[],
     config: RenderConfig,
   ): Promise<string> {
+    logger.info(
+      { videoId, scenes: inputScenes.length },
+      "Creating short video",
+    );
     logger.debug(
       {
         inputScenes,
         config,
       },
-      "Creating short video",
+      "Short video creation input",
     );
     const scenes: Scene[] = [];
     let totalDuration = 0;
-    const excludeVideoIds = [];
-    const tempFiles = [];
+    const excludeVideoIds: string[] = [];
+    const tempFiles: string[] = [];
 
     const orientation: OrientationEnum =
       config.orientation || OrientationEnum.portrait;
 
     let index = 0;
     for (const scene of inputScenes) {
-      const audio = await this.kokoro.generate(
-        scene.text,
-        config.voice ?? "af_heart",
+      const sceneNumber = index + 1;
+      const audio = await this.stage(
+        "narration",
+        { videoId, scene: sceneNumber, voice: config.voice ?? "af_heart" },
+        () => this.kokoro.generate(scene.text, config.voice ?? "af_heart"),
       );
       let { audioLength } = audio;
       const { audio: audioStream } = audio;
@@ -133,44 +216,67 @@ export class ShortCreator {
       tempFiles.push(tempVideoPath);
       tempFiles.push(tempWavPath, tempMp3Path);
 
-      await this.ffmpeg.saveNormalizedAudio(audioStream, tempWavPath);
-      const captions = await this.whisper.CreateCaption(tempWavPath);
+      await this.stage(
+        "audio-normalize",
+        { videoId, scene: sceneNumber },
+        () => this.ffmpeg.saveNormalizedAudio(audioStream, tempWavPath),
+      );
+      const captions = await this.stage(
+        "transcription",
+        { videoId, scene: sceneNumber },
+        () => this.whisper.CreateCaption(tempWavPath),
+      );
 
-      await this.ffmpeg.saveToMp3(audioStream, tempMp3Path);
-      const video = await this.pexelsApi.findVideo(
-        scene.searchTerms,
-        audioLength,
-        excludeVideoIds,
-        orientation,
+      await this.stage("audio-mp3", { videoId, scene: sceneNumber }, () =>
+        this.ffmpeg.saveToMp3(audioStream, tempMp3Path),
+      );
+      const video = await this.stage(
+        "stock-video",
+        { videoId, scene: sceneNumber, searchTerms: scene.searchTerms },
+        () =>
+          this.pexelsApi.findVideo(
+            scene.searchTerms,
+            audioLength,
+            excludeVideoIds,
+            orientation,
+          ),
       );
 
       logger.debug(`Downloading video from ${video.url} to ${tempVideoPath}`);
 
-      await new Promise<void>((resolve, reject) => {
-        const fileStream = fs.createWriteStream(tempVideoPath);
-        https
-          .get(video.url, (response: http.IncomingMessage) => {
-            if (response.statusCode !== 200) {
-              reject(
-                new Error(`Failed to download video: ${response.statusCode}`),
-              );
-              return;
-            }
+      await this.stage(
+        "stock-video-download",
+        { videoId, scene: sceneNumber, url: video.url },
+        () =>
+          new Promise<void>((resolve, reject) => {
+            const fileStream = fs.createWriteStream(tempVideoPath);
+            https
+              .get(video.url, (response: http.IncomingMessage) => {
+                if (response.statusCode !== 200) {
+                  reject(
+                    new Error(
+                      `Failed to download video: ${response.statusCode}`,
+                    ),
+                  );
+                  return;
+                }
 
-            response.pipe(fileStream);
+                response.pipe(fileStream);
 
-            fileStream.on("finish", () => {
-              fileStream.close();
-              logger.debug(`Video downloaded successfully to ${tempVideoPath}`);
-              resolve();
-            });
-          })
-          .on("error", (err: Error) => {
-            fs.unlink(tempVideoPath, () => {}); // Delete the file if download failed
-            logger.error(err, "Error downloading video:");
-            reject(err);
-          });
-      });
+                fileStream.on("finish", () => {
+                  fileStream.close();
+                  logger.debug(
+                    `Video downloaded successfully to ${tempVideoPath}`,
+                  );
+                  resolve();
+                });
+              })
+              .on("error", (err: Error) => {
+                fs.unlink(tempVideoPath, () => {}); // Delete the file if download failed
+                reject(err);
+              });
+          }),
+      );
 
       excludeVideoIds.push(video.id);
 
@@ -193,22 +299,27 @@ export class ShortCreator {
     const selectedMusic = this.findMusic(totalDuration, config.music);
     logger.debug({ selectedMusic }, "Selected music for the video");
 
-    await this.remotion.render(
-      {
-        music: selectedMusic,
-        scenes,
-        config: {
-          durationMs: totalDuration * 1000,
-          paddingBack: config.paddingBack,
-          ...{
-            captionBackgroundColor: config.captionBackgroundColor,
-            captionPosition: config.captionPosition,
+    await this.stage(
+      "render",
+      { videoId, scenes: scenes.length, durationMs: totalDuration * 1000 },
+      () =>
+        this.remotion.render(
+          {
+            music: selectedMusic,
+            scenes,
+            config: {
+              durationMs: totalDuration * 1000,
+              paddingBack: config.paddingBack,
+              ...{
+                captionBackgroundColor: config.captionBackgroundColor,
+                captionPosition: config.captionPosition,
+              },
+              musicVolume: config.musicVolume,
+            },
           },
-          musicVolume: config.musicVolume,
-        },
-      },
-      videoId,
-      orientation,
+          videoId,
+          orientation,
+        ),
     );
 
     for (const file of tempFiles) {

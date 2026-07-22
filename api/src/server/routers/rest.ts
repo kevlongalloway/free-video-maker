@@ -178,6 +178,19 @@ export class APIRouter {
           return;
         }
         const status = this.shortCreator.status(videoId);
+        // When a render failed, include the recorded reason (which stage threw
+        // and the error message) so the client isn't left guessing why a job
+        // instant-failed.
+        if (status === "failed") {
+          const failure = this.shortCreator.getFailure(videoId);
+          if (failure) {
+            res.status(200).json({
+              status,
+              error: { stage: failure.stage, message: failure.message },
+            });
+            return;
+          }
+        }
         res.status(200).json({ status });
       },
     );

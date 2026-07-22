@@ -20,6 +20,15 @@ export const logger = pino({
       return { level: label };
     },
   },
+  // Serialize Error objects (message + stack + cause) instead of logging an
+  // empty `{}`. Without this, `logger.error(err, "...")` can drop the stack
+  // trace entirely, which is exactly why render failures left no trace on
+  // Render. `err` is applied whether the Error is passed as the first
+  // argument or under an `err`/`error` key.
+  serializers: {
+    err: pino.stdSerializers.err,
+    error: pino.stdSerializers.err,
+  },
   base: {
     pid: process.pid,
     version: versionNumber,
