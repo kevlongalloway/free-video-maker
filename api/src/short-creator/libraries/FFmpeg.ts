@@ -6,7 +6,12 @@ export class FFMpeg {
   static async init(): Promise<FFMpeg> {
     return import("@ffmpeg-installer/ffmpeg").then((ffmpegInstaller) => {
       ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-      logger.info("FFmpeg path set to:", ffmpegInstaller.path);
+      // Structured field, not a second string arg — pino only interpolates
+      // trailing args when the message has a %s placeholder, so the old form
+      // silently dropped the path and logged "FFmpeg path set to:" with nothing
+      // after it. An actually-empty path here would break the ffmpeg stages, so
+      // log the real value.
+      logger.info({ ffmpegPath: ffmpegInstaller.path }, "FFmpeg path set");
       return new FFMpeg();
     });
   }
