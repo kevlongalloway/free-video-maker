@@ -5,6 +5,9 @@ import type {
 } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { randomUUID } from "crypto";
 import z from "zod";
 
 import { ShortCreator } from "../../short-creator/ShortCreator";
@@ -18,16 +21,27 @@ import { renderConfig, sceneInput } from "../../types/shorts";
 import { adBriefInput } from "../../types/ads";
 
 /**
- * MCP server exposed over SSE. Unlike the original single global server, each
- * SSE connection gets its own McpServer whose tools are bound to the
- * authenticated tenant. This gives us real multi-tenant isolation: a tenant
- * can only see and act on their own videos, and every render is metered
- * against their plan.
+ * MCP server exposed over two transports:
+ *   - Streamable HTTP at POST/GET/DELETE `/mcp` (the current spec; this is what
+ *     Claude's connectors use after OAuth to open the session + list tools).
+ *   - Legacy SSE at GET `/mcp/sse` + POST `/mcp/messages` (kept for older
+ *     clients).
+ *
+ * Unlike the original single global server, each connection gets its own
+ * McpServer whose tools are bound to the authenticated tenant. This gives us
+ * real multi-tenant isolation: a tenant can only see and act on their own
+ * videos, and every render is metered against their plan.
  */
 export class MCPRouter {
   public router: express.Router;
   private transports: {
     [sessionId: string]: { transport: SSEServerTransport; tenantId: string };
+  } = {};
+  private streamableTransports: {
+    [sessionId: string]: {
+      transport: StreamableHTTPServerTransport;
+      tenantId: string;
+    };
   } = {};
 
   constructor(
@@ -127,6 +141,73 @@ export class MCPRouter {
   }
 
   private setupRoutes() {
+    // ---- Streamable HTTP transport (current MCP spec) ----
+    // POST /mcp: initialize a session or dispatch a message on an existing one.
+    this.router.post(
+      "/",
+      express.json(),
+      async (req: ExpressRequest, res: ExpressResponse) => {
+        const tenant = req.tenant!;
+        const sessionId = req.headers["mcp-session-id"] as string | undefined;
+        let entry = sessionId
+          ? this.streamableTransports[sessionId]
+          : undefined;
+
+        if (entry) {
+          if (this.authEnabled && entry.tenantId !== tenant.id) {
+            res.status(403).json(
+              jsonRpcError("Session does not belong to this credential"),
+            );
+            return;
+          }
+        } else if (!sessionId && isInitializeRequest(req.body)) {
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (sid) => {
+              this.streamableTransports[sid] = { transport, tenantId: tenant.id };
+            },
+          });
+          transport.onclose = () => {
+            if (transport.sessionId) {
+              delete this.streamableTransports[transport.sessionId];
+            }
+          };
+          const server = this.buildServer(tenant);
+          await server.connect(transport);
+          logger.info({ tenantId: tenant.id }, "MCP streamable session opened");
+          entry = { transport, tenantId: tenant.id };
+        } else {
+          res
+            .status(400)
+            .json(jsonRpcError("No valid session ID for a non-init request"));
+          return;
+        }
+        await entry.transport.handleRequest(req, res, req.body);
+      },
+    );
+
+    // GET /mcp: server->client SSE stream. DELETE /mcp: end the session.
+    const handleStreamableSession = async (
+      req: ExpressRequest,
+      res: ExpressResponse,
+    ) => {
+      const tenant = req.tenant!;
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      const entry = sessionId ? this.streamableTransports[sessionId] : undefined;
+      if (!entry) {
+        res.status(400).send("Invalid or missing session ID");
+        return;
+      }
+      if (this.authEnabled && entry.tenantId !== tenant.id) {
+        res.status(403).send("Session does not belong to this credential");
+        return;
+      }
+      await entry.transport.handleRequest(req, res);
+    };
+    this.router.get("/", handleStreamableSession);
+    this.router.delete("/", handleStreamableSession);
+
+    // ---- Legacy SSE transport ----
     this.router.get("/sse", async (req: ExpressRequest, res: ExpressResponse) => {
       const tenant = req.tenant!;
       logger.info({ tenantId: tenant.id }, "MCP SSE connection opened");
@@ -161,4 +242,13 @@ export class MCPRouter {
       },
     );
   }
+}
+
+/** Build a JSON-RPC 2.0 error envelope for Streamable HTTP responses. */
+function jsonRpcError(message: string) {
+  return {
+    jsonrpc: "2.0" as const,
+    error: { code: -32000, message },
+    id: null,
+  };
 }
