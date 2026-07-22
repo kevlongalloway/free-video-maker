@@ -15,6 +15,15 @@ import { MusicManager } from "./short-creator/music";
 
 async function main() {
   const config = new Config();
+  logger.info(
+    {
+      logLevel: config.logLevel,
+      runningInDocker: config.runningInDocker,
+      whisperModel: config.whisperModel,
+      pexelsApiKeySet: Boolean(config.pexelsApiKey),
+    },
+    "Starting free-video-maker API",
+  );
   try {
     config.ensureConfig();
   } catch (err: unknown) {
@@ -24,24 +33,52 @@ async function main() {
 
   const musicManager = new MusicManager(config);
   try {
-    logger.debug("checking music files");
+    logger.info("checking music files");
     musicManager.ensureMusicFilesExist();
   } catch (error: unknown) {
     logger.error(error, "Missing music files");
     process.exit(1);
   }
 
-  logger.debug("initializing remotion");
-  const remotion = await Remotion.init(config);
-  logger.debug("initializing kokoro");
-  const kokoro = await Kokoro.init(config.kokoroModelPrecision);
-  logger.debug("initializing whisper");
-  const whisper = await Whisper.init(config);
-  logger.debug("initializing ffmpeg");
-  const ffmpeg = await FFMpeg.init();
-  const pexelsApi = new PexelsAPI(config.pexelsApiKey);
+  // These init steps load models / binaries and are the most likely place for
+  // a worker to crash on startup. Log each at info so a crash-on-boot on
+  // Render shows exactly which dependency failed to initialize.
+  try {
+    logger.info("initializing remotion");
+    const remotion = await Remotion.init(config);
+    logger.info("initializing kokoro");
+    const kokoro = await Kokoro.init(config.kokoroModelPrecision);
+    logger.info("initializing whisper");
+    const whisper = await Whisper.init(config);
+    logger.info("initializing ffmpeg");
+    const ffmpeg = await FFMpeg.init();
+    const pexelsApi = new PexelsAPI(config.pexelsApiKey);
 
-  logger.debug("initializing the short creator");
+    await startServer(
+      config,
+      remotion,
+      kokoro,
+      whisper,
+      ffmpeg,
+      pexelsApi,
+      musicManager,
+    );
+  } catch (error: unknown) {
+    logger.fatal(error, "Failed to initialize the render worker on startup");
+    process.exit(1);
+  }
+}
+
+async function startServer(
+  config: Config,
+  remotion: Remotion,
+  kokoro: Kokoro,
+  whisper: Whisper,
+  ffmpeg: FFMpeg,
+  pexelsApi: PexelsAPI,
+  musicManager: MusicManager,
+) {
+  logger.info("initializing the short creator");
   const shortCreator = new ShortCreator(
     config,
     remotion,
@@ -81,13 +118,25 @@ async function main() {
     }
   }
 
-  logger.debug("initializing the server");
+  logger.info("initializing the server");
   const server = new Server(config, shortCreator);
   const app = server.start();
+  logger.info({ port: config.port }, "Server started");
 
   // todo add shutdown handler
 }
 
+// Last-resort handlers: without these an async throw or rejected promise that
+// escapes the render pipeline can take the worker down silently, leaving no
+// trace in the Render logs. Log them at fatal so they always surface.
+process.on("unhandledRejection", (reason: unknown) => {
+  logger.fatal(reason, "Unhandled promise rejection");
+});
+process.on("uncaughtException", (error: unknown) => {
+  logger.fatal(error, "Uncaught exception");
+});
+
 main().catch((error: unknown) => {
   logger.error(error, "Error starting server");
+  process.exit(1);
 });
