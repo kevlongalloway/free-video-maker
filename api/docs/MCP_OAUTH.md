@@ -49,12 +49,13 @@ refreshes them automatically with the long-lived refresh token.
    URLs are correct out of the box. Only set `PUBLIC_URL` if you use a custom
    domain.
 3. On your phone (or claude.ai): **Settings → Connectors → Add custom
-   connector**, paste:
+   connector**, paste the **Streamable HTTP** endpoint (note: `/mcp`, not
+   `/mcp/sse`):
    ```
-   https://<your-api-host>/mcp/sse
+   https://<your-api-host>/mcp
    ```
    Tap **Connect** → the consent screen appears → paste your API key →
-   authorize. It syncs to the mobile app automatically.
+   authorize. It syncs to the mobile app automatically, and the tools appear.
 
 ## Notes
 
@@ -62,5 +63,7 @@ refreshes them automatically with the long-lived refresh token.
   file-backed under `DATA_DIR_PATH/oauth.json` (keep the persistent disk).
 - Raw `x-api-key` / `Authorization: Bearer <api-key>` still works for scripts
   and desktop clients; OAuth is additive.
-- The current MCP transport is SSE. Claude's connectors accept it today;
-  migrating to Streamable HTTP later is a good follow-up.
+- Transport: the server speaks the current **Streamable HTTP** transport at
+  `/mcp` (what Claude's connectors use to open the session and list tools),
+  and still exposes the **legacy SSE** transport at `/mcp/sse` + `/mcp/messages`
+  for older clients. Prefer `/mcp`.

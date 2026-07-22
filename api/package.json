@@ -52,13 +52,16 @@
       "onnxruntime-node",
       "protobufjs",
       "sharp"
-    ]
+    ],
+    "overrides": {
+      "zod-to-json-schema": "3.24.5"
+    }
   },
   "dependencies": {
     "@emotion/react": "^11.11.3",
     "@emotion/styled": "^11.11.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
-    "@modelcontextprotocol/sdk": "^1.9.0",
+    "@modelcontextprotocol/sdk": "^1.12.3",
     "@mui/icons-material": "^5.15.10",
     "@mui/material": "^5.15.10",
     "@remotion/bundler": "^4.0.286",
