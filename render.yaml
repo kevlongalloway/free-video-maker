@@ -31,7 +31,8 @@ services:
     # Swap to ./main.Dockerfile for higher quality if you size up the plan.
     dockerfilePath: ./main-tiny.Dockerfile
     dockerContext: .
-    plan: standard # standard = 2 GB / 1 CPU. Bump to "pro" (4 GB) for headroom.
+    plan: pro # pro = 4 GB / 2 CPU. Needed so Remotion + headless Chrome +
+    #           Whisper + Kokoro don't OOM mid-render (2 GB "standard" does).
     region: oregon # change to your closest region (e.g. frankfurt, singapore)
     # The app reads process.env.PORT, which Render sets automatically.
     healthCheckPath: /
